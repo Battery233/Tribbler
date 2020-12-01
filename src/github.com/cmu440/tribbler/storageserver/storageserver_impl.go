@@ -1,7 +1,6 @@
 package storageserver
 
 import (
-	"errors"
 	"fmt"
 	"github.com/cmu440/tribbler/util"
 	"net"
@@ -18,12 +17,16 @@ type storageServer struct {
 	isAlive bool       // DO NOT MODIFY
 	mux     sync.Mutex // DO NOT MODIFY
 
-	numNodes   int               // number of nodes in the system
-	hostPort   string            // the hostPort
-	port       int               // port number
-	virtualIDs []uint32          // unique identifier of the server
-	servers    []storagerpc.Node // all servers within the system
+	numNodes   int                 // number of nodes in the system
+	hostPort   string              // the hostPort
+	port       int                 // port number
+	virtualIDs []uint32            // unique identifier of the server
+	servers    []storagerpc.Node   // all servers within the system
+	valueMap   map[string]string   // map for storing values of Get
+	listMap    map[string][]string // map for storing values of GetList
 }
+
+//todo remove prints
 
 // USED FOR TESTS, DO NOT MODIFY
 func (ss *storageServer) SetAlive(alive bool) {
@@ -57,8 +60,10 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.virtualIDs = virtualIDs
 	ss.numNodes = numNodes
 	ss.servers = make([]storagerpc.Node, 0)
+	ss.valueMap = make(map[string]string)
+	ss.listMap = make(map[string][]string)
 
-	fmt.Printf("New server called: numNodes = %v, isMaster = %v",numNodes,masterServerHostPort=="")
+	fmt.Printf("New server called: numNodes = %v, isMaster = %v", numNodes, masterServerHostPort == "")
 
 	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
 	if err != nil {
@@ -89,7 +94,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 		for {
 			err := masterServer.Call("StorageServer.RegisterServer", &args, &reply)
 			if err != nil {
-				fmt.Printf("slave call master errer: %v",err)
+				fmt.Printf("slave call master errer: %v", err)
 				return nil, err
 			}
 			if reply.Status != storagerpc.OK {
@@ -133,7 +138,7 @@ func (ss *storageServer) getServers(args *storagerpc.GetServersArgs, reply *stor
 	ss.mux.Lock()
 	defer ss.mux.Unlock()
 	reply.Servers = ss.servers
-	fmt.Printf("getservers: len:%v, numNodes:%v, \n",len(ss.servers), ss.numNodes)
+	fmt.Printf("getservers: len:%v, numNodes:%v, \n", len(ss.servers), ss.numNodes)
 	if len(ss.servers) == ss.numNodes {
 		reply.Status = storagerpc.OK
 	} else {
@@ -143,25 +148,95 @@ func (ss *storageServer) getServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	value, ok := ss.valueMap[args.Key]
+	if !ok {
+		reply.Status = storagerpc.KeyNotFound
+		return nil
+	}
+	reply.Status = storagerpc.OK
+	reply.Value = value
+	//todo reply lease
+	return nil
 }
 
 func (ss *storageServer) delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	_, ok := ss.valueMap[args.Key]
+	if !ok {
+		reply.Status = storagerpc.KeyNotFound
+		return nil
+	}
+	delete(ss.valueMap, args.Key)
+	reply.Status = storagerpc.OK
+	return nil
 }
 
 func (ss *storageServer) getList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	value, ok := ss.listMap[args.Key]
+	if !ok {
+		reply.Status = storagerpc.KeyNotFound
+		return nil
+	}
+	reply.Status = storagerpc.OK
+	reply.Value = value
+	//todo reply lease
+	return nil
 }
 
 func (ss *storageServer) put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	ss.valueMap[args.Key] = args.Value
+	reply.Status = storagerpc.OK
+	return nil
 }
 
 func (ss *storageServer) appendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	_, ok := ss.listMap[args.Key]
+	if !ok {
+		ss.listMap[args.Key] = make([]string, 0)
+	} else {
+		ls := ss.listMap[args.Key]
+		for _, val := range ls {
+			if val == args.Value {
+				reply.Status = storagerpc.ItemExists
+				return nil
+			}
+		}
+	}
+	ss.listMap[args.Key] = append(ss.listMap[args.Key], args.Value)
+	reply.Status = storagerpc.OK
+	return nil
 }
 
 func (ss *storageServer) removeFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	return errors.New("not implemented")
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
+	ls, ok := ss.listMap[args.Key]
+	if ok {
+		index := -1
+		for i, val := range ls {
+			if val == args.Value {
+				index = i
+				break
+			}
+		}
+		if index != -1 {
+			ss.listMap[args.Key] = append(ls[:index], ls[index+1:]...)
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
+	} else {
+		//todo test it type
+		reply.Status = storagerpc.KeyNotFound
+	}
+	return nil
 }
