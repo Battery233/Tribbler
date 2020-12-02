@@ -140,6 +140,7 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 	tribble := tribrpc.Tribble{UserID: args.UserID, Posted: now, Contents: args.Contents}
 	marshaledTribble, _ := json.Marshal(tribble)
 	tribbleId := util.FormatPostKey(args.UserID, now.UnixNano())
+	reply.PostKey = tribbleId
 	if err := ts.lStore.AppendToList(util.FormatTribListKey(args.UserID), tribbleId); err != nil {
 		reply.Status = tribrpc.Exists
 		return nil
@@ -169,6 +170,7 @@ func (ts *tribServer) DeleteTribble(args *tribrpc.DeleteTribbleArgs, reply *trib
 		reply.Status = tribrpc.NoSuchPost
 		return nil
 	}
+	reply.Status = tribrpc.OK
 	return nil
 }
 
