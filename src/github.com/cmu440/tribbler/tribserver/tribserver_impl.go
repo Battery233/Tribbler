@@ -136,10 +136,17 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 		reply.Status = tribrpc.NoSuchUser
 		return nil
 	}
-	now := time.Now()
-	tribble := tribrpc.Tribble{UserID: args.UserID, Posted: now, Contents: args.Contents}
+	var tribble tribrpc.Tribble
+	var tribbleId string
+	for {
+		now := time.Now()
+		tribble = tribrpc.Tribble{UserID: args.UserID, Posted: now, Contents: args.Contents}
+		tribbleId = util.FormatPostKey(args.UserID, now.UnixNano())
+		if _, err := ts.lStore.Get(tribbleId); err != nil {
+			break
+		}
+	}
 	marshaledTribble, _ := json.Marshal(tribble)
-	tribbleId := util.FormatPostKey(args.UserID, now.UnixNano())
 	reply.PostKey = tribbleId
 	if err := ts.lStore.AppendToList(util.FormatTribListKey(args.UserID), tribbleId); err != nil {
 		reply.Status = tribrpc.Exists
@@ -193,7 +200,7 @@ func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.
 			reply.Tribbles = append(reply.Tribbles, t)
 		}
 		sort.Sort(ReverseTimeSorter(reply.Tribbles))
-		if len(reply.Tribbles)>100{
+		if len(reply.Tribbles) > 100 {
 			reply.Tribbles = reply.Tribbles[:100]
 		}
 	}
@@ -230,7 +237,7 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 		}
 	}
 	sort.Sort(ReverseTimeSorter(reply.Tribbles))
-	if len(reply.Tribbles)>100{
+	if len(reply.Tribbles) > 100 {
 		reply.Tribbles = reply.Tribbles[:100]
 	}
 	reply.Status = tribrpc.OK
