@@ -63,7 +63,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.valueMap = make(map[string]string)
 	ss.listMap = make(map[string][]string)
 
-	fmt.Printf("New server called: numNodes = %v, isMaster = %v", numNodes, masterServerHostPort == "")
+	fmt.Printf("New server called: numNodes = %v, isMaster = %v\n", numNodes, masterServerHostPort == "")
 
 	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
 	if err != nil {
