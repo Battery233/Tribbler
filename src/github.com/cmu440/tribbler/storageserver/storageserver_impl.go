@@ -63,8 +63,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.valueMap = make(map[string]string)
 	ss.listMap = make(map[string][]string)
 
-	fmt.Printf("New server called: numNodes = %v, isMaster = %v\n", numNodes, masterServerHostPort == "")
-
 	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
 	if err != nil {
 		return nil, err
@@ -105,7 +103,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 			}
 		}
 	}
-	//todo configure the ring
 	return ss, nil
 }
 
@@ -138,7 +135,6 @@ func (ss *storageServer) getServers(args *storagerpc.GetServersArgs, reply *stor
 	ss.mux.Lock()
 	defer ss.mux.Unlock()
 	reply.Servers = ss.servers
-	fmt.Printf("getservers: len:%v, numNodes:%v, \n", len(ss.servers), ss.numNodes)
 	if len(ss.servers) == ss.numNodes {
 		reply.Status = storagerpc.OK
 	} else {
