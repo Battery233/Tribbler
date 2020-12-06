@@ -15,3 +15,17 @@ func CompareUint32Slice(s1, s2 []uint32) bool {
 	}
 	return true
 }
+
+type UInt32Sorter []uint32
+
+func (f UInt32Sorter) Len() int {
+	return len(f)
+}
+
+func (f UInt32Sorter) Less(i, j int) bool {
+	return f[i] < f[j]
+}
+
+func (f UInt32Sorter) Swap(i, j int) {
+	f[i], f[j] = f[j], f[i]
+}

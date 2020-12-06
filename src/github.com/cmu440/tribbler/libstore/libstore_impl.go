@@ -3,8 +3,9 @@ package libstore
 import (
 	"errors"
 	"github.com/cmu440/tribbler/rpc/librpc"
-	"math"
+	"github.com/cmu440/tribbler/util"
 	"net/rpc"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,9 +13,10 @@ import (
 )
 
 type libstore struct {
-	storageServers      map[uint32]*rpc.Client
-	myHostPort          string
-	leaseMode           LeaseMode
+	storageServers  map[uint32]*rpc.Client
+	sortedServerIDs []uint32
+	myHostPort      string
+	leaseMode       LeaseMode
 }
 
 const MaximumAttempt = 5
@@ -63,20 +65,24 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	}
 
 	dialClients := make(map[uint32]*rpc.Client)
+	sortedIDs := make([]uint32, 0)
 	for _, node := range reply.Servers {
 		ss, err := rpc.DialHTTP("tcp", node.HostPort)
 		if err != nil {
 			return nil, err
 		}
-		for _,id:=range node.VirtualIDs{
+		for _, id := range node.VirtualIDs {
 			dialClients[id] = ss
+			sortedIDs = append(sortedIDs, id)
 		}
 	}
 
+	sort.Sort(util.UInt32Sorter(sortedIDs))
 	lStore := &libstore{
-		storageServers:      dialClients,
-		myHostPort:          myHostPort,
-		leaseMode:           mode,
+		storageServers:  dialClients,
+		myHostPort:      myHostPort,
+		leaseMode:       mode,
+		sortedServerIDs: sortedIDs,
 	}
 	err = rpc.RegisterName("LeaseCallbacks", librpc.Wrap(lStore))
 	if err != nil {
@@ -86,15 +92,20 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 }
 
 func (ls *libstore) Get(key string) (string, error) {
-	// TODO: get routed server
 	args := &storagerpc.GetArgs{
 		Key:       key,
 		WantLease: false,         //todo lease here
 		HostPort:  ls.myHostPort, //todo
 	}
 	reply := &storagerpc.GetReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.Get", args, reply); err != nil {
-		return "", err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.Get", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
 	if reply.Status != storagerpc.OK {
 		return "", errors.New("get key not found")
@@ -108,8 +119,14 @@ func (ls *libstore) Put(key, value string) error {
 		Value: value,
 	}
 	reply := &storagerpc.PutReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.Put", args, reply); err != nil {
-		return err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.Put", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
 	if reply.Status != storagerpc.OK {
 		return errors.New("put error")
@@ -120,8 +137,14 @@ func (ls *libstore) Put(key, value string) error {
 func (ls *libstore) Delete(key string) error {
 	args := &storagerpc.DeleteArgs{Key: key}
 	reply := &storagerpc.DeleteReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.Delete", args, reply); err != nil {
-		return err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.Delete", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
 	if reply.Status == storagerpc.OK {
 		return nil
@@ -137,9 +160,16 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 		HostPort:  ls.myHostPort, //todo
 	}
 	reply := &storagerpc.GetListReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.GetList", args, reply); err != nil {
-		return nil, err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.GetList", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
+
 	if reply.Status != storagerpc.OK {
 		return nil, errors.New("getList key not found")
 	}
@@ -152,8 +182,14 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 		Value: removeItem,
 	}
 	reply := &storagerpc.PutReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.RemoveFromList", args, reply); err != nil {
-		return err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.RemoveFromList", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
 	if reply.Status == storagerpc.KeyNotFound {
 		return errors.New("remove from list key not found")
@@ -168,8 +204,14 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 func (ls *libstore) AppendToList(key, newItem string) error {
 	args := &storagerpc.PutArgs{Key: key, Value: newItem}
 	reply := &storagerpc.PutReply{}
-	if err := ls.chooseStorageServer(key).Call("StorageServer.AppendToList", args, reply); err != nil {
-		return err
+	storageServerIndex := ls.chooseStorageServer(key)
+	for i := 0; i < len(ls.sortedServerIDs); i++ {
+		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.AppendToList", args, reply)
+		if err == nil {
+			break
+		} else {
+			storageServerIndex = (storageServerIndex + 1) % len(ls.storageServers)
+		}
 	}
 	if reply.Status == storagerpc.ItemExists {
 		return errors.New("error status ItemExists")
@@ -184,26 +226,29 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 	return nil
 }
 
-func (ls *libstore) chooseStorageServer(key string) *rpc.Client {
-	key = strings.Split(key,":")[0]
-	hash := StoreHash(key)
+func (ls *libstore) chooseStorageServer(key string) int {
+	hash := StoreHash(strings.Split(key, ":")[0])
+	servers := ls.sortedServerIDs
 
-	var resultKey uint32 = math.MaxUint32
-	var minKey uint32 = math.MaxUint32
-
-	for k,v:=range ls.storageServers{
-		if k < minKey {
-			minKey = k
+	if hash < servers[0] {
+		return 0
+	} else if hash > servers[len(servers)-1] {
+		return len(servers) - 1
+	}
+	left, right := 0, len(servers)-1
+	for left <= right {
+		mid := left + (right-left)/2
+		if servers[mid] == hash {
+			return mid
 		}
-
-		if k==hash {
-			return v
-		} else if k > hash && k < resultKey {
-			resultKey = k
+		if servers[mid] < hash {
+			left = mid + 1
+		} else {
+			right = mid - 1
 		}
 	}
-	if _, ok := ls.storageServers[math.MaxUint32]; resultKey == math.MaxUint32 && !ok {
-		return ls.storageServers[minKey]
+	if left < len(servers) {
+		return right
 	}
-	return ls.storageServers[resultKey]
+	return left
 }
