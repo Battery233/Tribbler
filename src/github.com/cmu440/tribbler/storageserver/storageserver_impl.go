@@ -2,7 +2,6 @@ package storageserver
 
 import (
 	"fmt"
-	"github.com/cmu440/tribbler/util"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"github.com/cmu440/tribbler/util"
 )
 
 type storageServer struct {

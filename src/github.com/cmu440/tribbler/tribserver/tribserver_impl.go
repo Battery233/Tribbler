@@ -2,15 +2,15 @@ package tribserver
 
 import (
 	"encoding/json"
-	"github.com/cmu440/tribbler/libstore"
-	"github.com/cmu440/tribbler/util"
 	"net"
 	"net/http"
 	"net/rpc"
 	"sort"
 	"time"
 
+	"github.com/cmu440/tribbler/libstore"
 	"github.com/cmu440/tribbler/rpc/tribrpc"
+	"github.com/cmu440/tribbler/util"
 )
 
 type tribServer struct {

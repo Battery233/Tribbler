@@ -2,14 +2,15 @@ package libstore
 
 import (
 	"errors"
-	"github.com/cmu440/tribbler/rpc/librpc"
-	"github.com/cmu440/tribbler/util"
 	"net/rpc"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cmu440/tribbler/rpc/librpc"
 	"github.com/cmu440/tribbler/rpc/storagerpc"
+	"github.com/cmu440/tribbler/util"
 )
 
 type libstore struct {
@@ -17,6 +18,24 @@ type libstore struct {
 	sortedServerIDs []uint32
 	myHostPort      string
 	leaseMode       LeaseMode
+	localCache      localCache
+	queryCounter    queryCounter
+}
+
+type localCache struct {
+	mux   sync.Mutex
+	cache map[string]cachedValue
+}
+
+type cachedValue struct {
+	value          string
+	list           []string
+	remainingLease int
+}
+
+type queryCounter struct {
+	mux        sync.Mutex
+	keyHistory [][]string
 }
 
 const MaximumAttempt = 5
@@ -80,21 +99,46 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	sort.Sort(util.UInt32Sorter(sortedIDs))
 	lStore := &libstore{
 		storageServers:  dialClients,
-		myHostPort:      myHostPort,
+		myHostPort:      myHostPort,  //todo check my host port ==""
 		leaseMode:       mode,
 		sortedServerIDs: sortedIDs,
+		queryCounter: queryCounter{
+			mux:        sync.Mutex{},
+			keyHistory: make([][]string, 0),
+		},
+		localCache: localCache{
+			mux:   sync.Mutex{},
+			cache: make(map[string]cachedValue),
+		},
 	}
 	err = rpc.RegisterName("LeaseCallbacks", librpc.Wrap(lStore))
 	if err != nil {
 		return nil, err
 	}
+	lStore.queryCounter.keyHistory = append(lStore.queryCounter.keyHistory, make([]string, 0)) //add the history slot for the first second
+
+	go lStore.cacheManager()
+
 	return lStore, nil
 }
 
 func (ls *libstore) Get(key string) (string, error) {
+	ls.queryCounter.mux.Lock()
+	lastIndex := len(ls.queryCounter.keyHistory) - 1
+	ls.queryCounter.keyHistory[lastIndex] = append(ls.queryCounter.keyHistory[lastIndex], key)
+	ls.queryCounter.mux.Unlock()
+
+	ls.localCache.mux.Lock()
+	cache, ok := ls.localCache.cache[key]
+	ls.localCache.mux.Unlock()
+	if ok {
+		return cache.value, nil
+	}
+
+	wantLease :=  ls.checkWantLease(key)
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: false,         //todo lease here
+		WantLease: wantLease,     //todo lease here
 		HostPort:  ls.myHostPort, //todo
 	}
 	reply := &storagerpc.GetReply{}
@@ -110,6 +154,17 @@ func (ls *libstore) Get(key string) (string, error) {
 	if reply.Status != storagerpc.OK {
 		return "", errors.New("get key not found")
 	}
+
+	if wantLease && reply.Lease.Granted{
+		ls.localCache.mux.Lock()
+		ls.localCache.cache[key] = cachedValue{
+			value:          reply.Value,
+			list:           nil,
+			remainingLease: reply.Lease.ValidSeconds,
+		}
+		ls.localCache.mux.Unlock()
+	}
+
 	return reply.Value, nil
 }
 
@@ -154,9 +209,22 @@ func (ls *libstore) Delete(key string) error {
 }
 
 func (ls *libstore) GetList(key string) ([]string, error) {
+	ls.queryCounter.mux.Lock()
+	lastIndex := len(ls.queryCounter.keyHistory) - 1
+	ls.queryCounter.keyHistory[lastIndex] = append(ls.queryCounter.keyHistory[lastIndex], key)
+	ls.queryCounter.mux.Unlock()
+
+	ls.localCache.mux.Lock()
+	cache, ok := ls.localCache.cache[key]
+	ls.localCache.mux.Unlock()
+	if ok {
+		return cache.list, nil
+	}
+
+	wantLease := ls.checkWantLease(key)
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: false,         //todo lease here
+		WantLease: wantLease,     //todo lease here
 		HostPort:  ls.myHostPort, //todo
 	}
 	reply := &storagerpc.GetListReply{}
@@ -173,6 +241,17 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	if reply.Status != storagerpc.OK {
 		return nil, errors.New("getList key not found")
 	}
+
+	if wantLease && reply.Lease.Granted{
+		ls.localCache.mux.Lock()
+		ls.localCache.cache[key] = cachedValue{
+			value:          "",
+			list:           reply.Value,
+			remainingLease: reply.Lease.ValidSeconds,
+		}
+		ls.localCache.mux.Unlock()
+	}
+
 	return reply.Value, nil
 }
 
@@ -222,7 +301,14 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 }
 
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
-	//todo implement it
+	ls.localCache.mux.Lock()
+	defer ls.localCache.mux.Unlock()
+	if _, ok := ls.localCache.cache[args.Key]; ok {
+		delete(ls.localCache.cache, args.Key)
+		reply.Status = storagerpc.OK
+	} else {
+		reply.Status = storagerpc.KeyNotFound
+	}
 	return nil
 }
 
@@ -251,4 +337,55 @@ func (ls *libstore) chooseStorageServer(key string) int {
 		return right
 	}
 	return left
+}
+
+func (ls *libstore) cacheManager() {
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			ls.queryCounter.mux.Lock()
+			if len(ls.queryCounter.keyHistory) == storagerpc.QueryCacheSeconds {
+				ls.queryCounter.keyHistory = ls.queryCounter.keyHistory[1:]
+			}
+			ls.queryCounter.keyHistory = append(ls.queryCounter.keyHistory, make([]string, 0))
+			ls.queryCounter.mux.Unlock()
+
+			ls.localCache.mux.Lock()
+			for k, v := range ls.localCache.cache {
+				v.remainingLease--
+				if v.remainingLease == 0 {
+					delete(ls.localCache.cache, k)
+				}
+			}
+			ls.localCache.mux.Unlock()
+		}
+	}
+}
+
+func (ls *libstore) reachQueryCacheThresh(key string) bool {
+	ls.queryCounter.mux.Lock()
+	defer ls.queryCounter.mux.Unlock()
+	counter := 0
+	for _, records := range ls.queryCounter.keyHistory {
+		for _, s := range records {
+			if s == key {
+				counter++
+			}
+			if counter == storagerpc.QueryCacheThresh {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (ls *libstore) checkWantLease(key string) bool {
+	if ls.leaseMode==Never || ls.myHostPort==""{
+		return false
+	}
+	if ls.leaseMode==Always{
+		return true
+	}
+	return ls.reachQueryCacheThresh(key)
 }
