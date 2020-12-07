@@ -17,15 +17,17 @@ type storageServer struct {
 	isAlive bool       // DO NOT MODIFY
 	mux     sync.Mutex // DO NOT MODIFY
 
-	numNodes     int                     // number of nodes in the system
-	hostPort     string                  // the hostPort
-	port         int                     // port number
-	virtualIDs   []uint32                // unique identifier of the server
-	servers      []storagerpc.Node       // all servers within the system
-	valueMap     map[string]string       // map for storing values of Get
-	listMap      map[string][]string     // map for storing values of GetList
-	cacheRecords map[string]leaseRemains // cache record for a specific key string
-	keyMux       map[string]*sync.Mutex
+	numNodes       int               // number of nodes in the system
+	hostPort       string            // the hostPort
+	port           int               // port number
+	virtualIDs     []uint32          // unique identifier of the server
+	servers        []storagerpc.Node // all servers within the system
+	valueMap       map[string]string // map for storing values of Get
+	valueMapMux    sync.Mutex
+	listMap        map[string][]string // map for storing values of GetList
+	listMapMux     sync.Mutex
+	cacheRecords   map[string]leaseRemains // cache record for a specific key string
+	cacheRecordMux sync.Mutex
 }
 
 type leaseRemains map[string]int //map of port to seconds remains
@@ -67,7 +69,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	ss.valueMap = make(map[string]string)
 	ss.listMap = make(map[string][]string)
 	ss.cacheRecords = make(map[string]leaseRemains)
-	ss.keyMux = make(map[string]*sync.Mutex)
 
 	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(ss))
 	if err != nil {
@@ -153,24 +154,24 @@ func (ss *storageServer) getServers(args *storagerpc.GetServersArgs, reply *stor
 }
 
 func (ss *storageServer) get(args *storagerpc.GetArgs, reply *storagerpc.GetReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
+	ss.valueMapMux.Lock()
+	defer ss.valueMapMux.Unlock()
+	value, ok := ss.valueMap[args.Key]
+	if !ok {
 		reply.Status = storagerpc.KeyNotFound
 		return nil
 	}
-
-	ss.keyMux[args.Key].Lock()
-	defer ss.keyMux[args.Key].Unlock()
-
-	value := ss.valueMap[args.Key]
 	if args.WantLease {
 		reply.Lease = storagerpc.Lease{
 			Granted:      true,
 			ValidSeconds: storagerpc.LeaseSeconds,
 		}
+		ss.cacheRecordMux.Lock()
 		if ss.cacheRecords[args.Key] == nil {
 			ss.cacheRecords[args.Key] = make(leaseRemains)
 		}
 		ss.cacheRecords[args.Key][args.HostPort] = storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
+		ss.cacheRecordMux.Unlock()
 	}
 	reply.Status = storagerpc.OK
 	reply.Value = value
@@ -178,37 +179,37 @@ func (ss *storageServer) get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 }
 
 func (ss *storageServer) delete(args *storagerpc.DeleteArgs, reply *storagerpc.DeleteReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
+	ss.valueMapMux.Lock()
+	defer ss.valueMapMux.Unlock()
+	_, ok := ss.valueMap[args.Key]
+	if !ok {
 		reply.Status = storagerpc.KeyNotFound
 		return nil
 	}
-	ss.keyMux[args.Key].Lock()
-	ss.removeLeases(args.Key)
 	delete(ss.valueMap, args.Key)
 	reply.Status = storagerpc.OK
-	ss.keyMux[args.Key].Unlock()
-	delete(ss.keyMux, args.Key)
 	return nil
 }
 
 func (ss *storageServer) getList(args *storagerpc.GetArgs, reply *storagerpc.GetListReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
+	ss.listMapMux.Lock()
+	defer ss.listMapMux.Unlock()
+	value, ok := ss.listMap[args.Key]
+	if !ok {
 		reply.Status = storagerpc.KeyNotFound
 		return nil
 	}
-	ss.keyMux[args.Key].Lock()
-	defer ss.keyMux[args.Key].Unlock()
-
-	value := ss.listMap[args.Key]
 	if args.WantLease {
 		reply.Lease = storagerpc.Lease{
 			Granted:      true,
 			ValidSeconds: storagerpc.LeaseSeconds,
 		}
+		ss.cacheRecordMux.Lock()
 		if ss.cacheRecords[args.Key] == nil {
 			ss.cacheRecords[args.Key] = make(leaseRemains)
 		}
 		ss.cacheRecords[args.Key][args.HostPort] = storagerpc.LeaseSeconds + storagerpc.LeaseGuardSeconds
+		ss.cacheRecordMux.Unlock()
 	}
 	reply.Status = storagerpc.OK
 	reply.Value = value
@@ -216,11 +217,8 @@ func (ss *storageServer) getList(args *storagerpc.GetArgs, reply *storagerpc.Get
 }
 
 func (ss *storageServer) put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
-		ss.keyMux[args.Key] = &sync.Mutex{}
-	} //todo lock this if?
-	ss.keyMux[args.Key].Lock()
-	defer ss.keyMux[args.Key].Unlock()
+	ss.valueMapMux.Lock()
+	defer ss.valueMapMux.Unlock()
 	ss.removeLeases(args.Key)
 	ss.valueMap[args.Key] = args.Value
 	reply.Status = storagerpc.OK
@@ -228,12 +226,8 @@ func (ss *storageServer) put(args *storagerpc.PutArgs, reply *storagerpc.PutRepl
 }
 
 func (ss *storageServer) appendToList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
-		ss.keyMux[args.Key] = &sync.Mutex{}
-	}
-	ss.keyMux[args.Key].Lock()
-	defer ss.keyMux[args.Key].Unlock()
-
+	ss.listMapMux.Lock()
+	defer ss.listMapMux.Unlock()
 	_, ok := ss.listMap[args.Key]
 	if !ok {
 		ss.listMap[args.Key] = make([]string, 0)
@@ -253,27 +247,27 @@ func (ss *storageServer) appendToList(args *storagerpc.PutArgs, reply *storagerp
 }
 
 func (ss *storageServer) removeFromList(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
-	if _, ok := ss.keyMux[args.Key]; !ok {
-		reply.Status = storagerpc.KeyNotFound
-		return nil
-	}
-	ss.keyMux[args.Key].Lock()
-	defer ss.keyMux[args.Key].Unlock()
-
-	ls := ss.listMap[args.Key]
-	index := -1
-	for i, val := range ls {
-		if val == args.Value {
-			index = i
-			break
+	ss.listMapMux.Lock()
+	defer ss.listMapMux.Unlock()
+	ls, ok := ss.listMap[args.Key]
+	if ok {
+		index := -1
+		for i, val := range ls {
+			if val == args.Value {
+				index = i
+				break
+			}
 		}
-	}
-	if index != -1 {
-		ss.removeLeases(args.Key)
-		ss.listMap[args.Key] = append(ls[:index], ls[index+1:]...)
-		reply.Status = storagerpc.OK
+		if index != -1 {
+			ss.removeLeases(args.Key)
+			ss.listMap[args.Key] = append(ls[:index], ls[index+1:]...)
+			reply.Status = storagerpc.OK
+		} else {
+			reply.Status = storagerpc.ItemNotFound
+		}
 	} else {
-		reply.Status = storagerpc.ItemNotFound
+		//todo test it type
+		reply.Status = storagerpc.KeyNotFound
 	}
 	return nil
 }
@@ -283,8 +277,8 @@ func (ss *storageServer) cacheManager() {
 	for {
 		select {
 		case <-ticker.C:
+			ss.cacheRecordMux.Lock()
 			for key, leases := range ss.cacheRecords {
-				ss.keyMux[key].Lock()
 				for port := range leases {
 					leases[port]--
 					if leases[port] == 0 {
@@ -294,13 +288,15 @@ func (ss *storageServer) cacheManager() {
 				if len(leases) == 0 {
 					delete(ss.cacheRecords, key)
 				}
-				ss.keyMux[key].Unlock()
 			}
+			ss.cacheRecordMux.Unlock()
 		}
 	}
 }
 
 func (ss *storageServer) removeLeases(key string) {
+	ss.cacheRecordMux.Lock()
+	defer ss.cacheRecordMux.Unlock()
 	if leases, ok := ss.cacheRecords[key]; ok {
 		revokeResponseChannel := make(chan bool)
 		for port := range leases {
