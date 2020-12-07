@@ -99,7 +99,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 	sort.Sort(util.UInt32Sorter(sortedIDs))
 	lStore := &libstore{
 		storageServers:  dialClients,
-		myHostPort:      myHostPort,  //todo check my host port ==""
+		myHostPort:      myHostPort, //todo check my host port ==""
 		leaseMode:       mode,
 		sortedServerIDs: sortedIDs,
 		queryCounter: queryCounter{
@@ -135,7 +135,7 @@ func (ls *libstore) Get(key string) (string, error) {
 		return cache.value, nil
 	}
 
-	wantLease :=  ls.checkWantLease(key)
+	wantLease := ls.checkWantLease(key)
 	args := &storagerpc.GetArgs{
 		Key:       key,
 		WantLease: wantLease,     //todo lease here
@@ -155,7 +155,7 @@ func (ls *libstore) Get(key string) (string, error) {
 		return "", errors.New("get key not found")
 	}
 
-	if wantLease && reply.Lease.Granted{
+	if wantLease && reply.Lease.Granted {
 		ls.localCache.mux.Lock()
 		ls.localCache.cache[key] = cachedValue{
 			value:          reply.Value,
@@ -192,6 +192,12 @@ func (ls *libstore) Put(key, value string) error {
 func (ls *libstore) Delete(key string) error {
 	args := &storagerpc.DeleteArgs{Key: key}
 	reply := &storagerpc.DeleteReply{}
+	ls.localCache.mux.Lock()
+	if _, ok := ls.localCache.cache[key]; ok {
+		delete(ls.localCache.cache, key)
+	}
+	ls.localCache.mux.Unlock()
+
 	storageServerIndex := ls.chooseStorageServer(key)
 	for i := 0; i < len(ls.sortedServerIDs); i++ {
 		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.Delete", args, reply)
@@ -242,7 +248,7 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 		return nil, errors.New("getList key not found")
 	}
 
-	if wantLease && reply.Lease.Granted{
+	if wantLease && reply.Lease.Granted {
 		ls.localCache.mux.Lock()
 		ls.localCache.cache[key] = cachedValue{
 			value:          "",
@@ -261,6 +267,11 @@ func (ls *libstore) RemoveFromList(key, removeItem string) error {
 		Value: removeItem,
 	}
 	reply := &storagerpc.PutReply{}
+	ls.localCache.mux.Lock()
+	if _, ok := ls.localCache.cache[key]; ok {
+		delete(ls.localCache.cache, key)
+	}
+	ls.localCache.mux.Unlock()
 	storageServerIndex := ls.chooseStorageServer(key)
 	for i := 0; i < len(ls.sortedServerIDs); i++ {
 		err := ls.storageServers[ls.sortedServerIDs[storageServerIndex]].Call("StorageServer.RemoveFromList", args, reply)
@@ -381,10 +392,10 @@ func (ls *libstore) reachQueryCacheThresh(key string) bool {
 }
 
 func (ls *libstore) checkWantLease(key string) bool {
-	if ls.leaseMode==Never || ls.myHostPort==""{
+	if ls.leaseMode == Never || ls.myHostPort == "" {
 		return false
 	}
-	if ls.leaseMode==Always{
+	if ls.leaseMode == Always {
 		return true
 	}
 	return ls.reachQueryCacheThresh(key)
