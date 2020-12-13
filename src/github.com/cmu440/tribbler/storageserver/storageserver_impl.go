@@ -300,7 +300,6 @@ func (ss *storageServer) cacheManager() {
 // removeLeases is the function to revoke all the leases for a specific key.
 func (ss *storageServer) removeLeases(key string) {
 	ss.cacheRecordMux.Lock()
-	defer ss.cacheRecordMux.Unlock()
 	if leases, ok := ss.cacheRecords[key]; ok {
 		revokeResponseChannel := make(chan bool)
 		for port := range leases {
@@ -316,9 +315,12 @@ func (ss *storageServer) removeLeases(key string) {
 				}
 			}(port, revokeResponseChannel)
 		}
+		ss.cacheRecordMux.Unlock()
 		for i := 0; i < len(leases); i++ {
 			//return until all the feedback of RPC calls are received
 			<-revokeResponseChannel
 		}
+	} else {
+		ss.cacheRecordMux.Unlock()
 	}
 }
