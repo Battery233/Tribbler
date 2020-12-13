@@ -1,7 +1,6 @@
 package storageserver
 
 import (
-	"fmt"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -31,8 +30,6 @@ type storageServer struct {
 }
 
 type leaseRemains map[string]int //map of port to seconds remains
-
-//todo remove prints
 
 // USED FOR TESTS, DO NOT MODIFY
 func (ss *storageServer) SetAlive(alive bool) {
@@ -78,9 +75,10 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 	rpc.HandleHTTP()
 	go http.Serve(listener, nil)
 
-	if masterServerHostPort == "" { // is master
+	if masterServerHostPort == "" { // this server is the master server
 		masterNode := storagerpc.Node{HostPort: hostPort, VirtualIDs: virtualIDs}
 		ss.servers = append(ss.servers, masterNode)
+		// wait until all slave servers are ready
 		for {
 			ss.mux.Lock()
 			ready := len(ss.servers) == ss.numNodes
@@ -91,7 +89,7 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 				time.Sleep(time.Second)
 			}
 		}
-	} else { // this server is a slave
+	} else { // this server is a slave server
 		masterServer, _ := rpc.DialHTTP("tcp", masterServerHostPort)
 		serverInfo := storagerpc.Node{HostPort: hostPort, VirtualIDs: virtualIDs}
 		args := storagerpc.RegisterArgs{ServerInfo: serverInfo}
@@ -99,7 +97,6 @@ func NewStorageServer(masterServerHostPort string, numNodes, port int, virtualID
 		for {
 			err := masterServer.Call("StorageServer.RegisterServer", &args, &reply)
 			if err != nil {
-				fmt.Printf("slave call master errer: %v", err)
 				return nil, err
 			}
 			if reply.Status != storagerpc.OK {
@@ -123,6 +120,7 @@ func (ss *storageServer) registerServer(args *storagerpc.RegisterArgs, reply *st
 	slave := args.ServerInfo
 	alreadyRegistered := false
 	for _, registeredSlave := range ss.servers {
+		//test if the server is already registered
 		if util.CompareUint32Slice(registeredSlave.VirtualIDs, slave.VirtualIDs) {
 			alreadyRegistered = true
 			break
@@ -162,6 +160,7 @@ func (ss *storageServer) get(args *storagerpc.GetArgs, reply *storagerpc.GetRepl
 		return nil
 	}
 	if args.WantLease {
+		//create local lease record and store it into the map
 		reply.Lease = storagerpc.Lease{
 			Granted:      true,
 			ValidSeconds: storagerpc.LeaseSeconds,
@@ -200,6 +199,7 @@ func (ss *storageServer) getList(args *storagerpc.GetArgs, reply *storagerpc.Get
 		return nil
 	}
 	if args.WantLease {
+		//create local lease record and store it into the map
 		reply.Lease = storagerpc.Lease{
 			Granted:      true,
 			ValidSeconds: storagerpc.LeaseSeconds,
@@ -219,6 +219,7 @@ func (ss *storageServer) getList(args *storagerpc.GetArgs, reply *storagerpc.Get
 func (ss *storageServer) put(args *storagerpc.PutArgs, reply *storagerpc.PutReply) error {
 	ss.valueMapMux.Lock()
 	defer ss.valueMapMux.Unlock()
+	// revoking old leases
 	ss.removeLeases(args.Key)
 	ss.valueMap[args.Key] = args.Value
 	reply.Status = storagerpc.OK
@@ -232,6 +233,7 @@ func (ss *storageServer) appendToList(args *storagerpc.PutArgs, reply *storagerp
 	if !ok {
 		ss.listMap[args.Key] = make([]string, 0)
 	} else {
+		// test if the item already exists
 		ls := ss.listMap[args.Key]
 		for _, val := range ls {
 			if val == args.Value {
@@ -266,12 +268,13 @@ func (ss *storageServer) removeFromList(args *storagerpc.PutArgs, reply *storage
 			reply.Status = storagerpc.ItemNotFound
 		}
 	} else {
-		//todo test it type
 		reply.Status = storagerpc.KeyNotFound
 	}
 	return nil
 }
 
+// cacheManager is the go routine for decreasing the lease value recorded at local storage every second.
+// A value reaches 0 means the lease on the libstore is considered invalid
 func (ss *storageServer) cacheManager() {
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -294,6 +297,7 @@ func (ss *storageServer) cacheManager() {
 	}
 }
 
+// removeLeases is the function to revoke all the leases for a specific key.
 func (ss *storageServer) removeLeases(key string) {
 	ss.cacheRecordMux.Lock()
 	defer ss.cacheRecordMux.Unlock()
@@ -304,9 +308,8 @@ func (ss *storageServer) removeLeases(key string) {
 				leaseHolder, _ := rpc.DialHTTP("tcp", port)
 				args := &storagerpc.RevokeLeaseArgs{Key: key}
 				reply := &storagerpc.RevokeLeaseReply{}
-				// TODO: if fail, re-call RevokeLease?
+				//no matter if the RPC call is successful, notify the server routine
 				if err := leaseHolder.Call("LeaseCallbacks.RevokeLease", args, reply); err != nil {
-					fmt.Println("Revoke Lease return err not nil!")
 					revokeResponseChannel <- false
 				} else if reply.Status == storagerpc.OK || reply.Status == storagerpc.KeyNotFound {
 					revokeResponseChannel <- true
@@ -314,6 +317,7 @@ func (ss *storageServer) removeLeases(key string) {
 			}(port, revokeResponseChannel)
 		}
 		for i := 0; i < len(leases); i++ {
+			//return until all the feedback of RPC calls are received
 			<-revokeResponseChannel
 		}
 	}

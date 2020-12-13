@@ -14,12 +14,12 @@ import (
 )
 
 type libstore struct {
-	storageServers  map[uint32]*rpc.Client
-	sortedServerIDs []uint32
+	storageServers  map[uint32]*rpc.Client // map that stores all rpc connections
+	sortedServerIDs []uint32               // this is needed to perform binary search
 	myHostPort      string
 	leaseMode       LeaseMode
 	localCache      localCache
-	queryCounter    queryCounter
+	queryCounter    queryCounter // a 2D array for identifying which item needs to be cached
 }
 
 type localCache struct {
@@ -27,6 +27,8 @@ type localCache struct {
 	cache map[string]cachedValue
 }
 
+// cachedValue can either store a single value cache or a list cache, and it
+// keeps track of the remaining lease time in seconds
 type cachedValue struct {
 	value          string
 	list           []string
@@ -96,10 +98,11 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 		}
 	}
 
+	// sort it so that we can perform binary search
 	sort.Sort(util.UInt32Sorter(sortedIDs))
 	lStore := &libstore{
 		storageServers:  dialClients,
-		myHostPort:      myHostPort, //todo check my host port ==""
+		myHostPort:      myHostPort,
 		leaseMode:       mode,
 		sortedServerIDs: sortedIDs,
 		queryCounter: queryCounter{
@@ -123,6 +126,7 @@ func NewLibstore(masterServerHostPort, myHostPort string, mode LeaseMode) (Libst
 }
 
 func (ls *libstore) Get(key string) (string, error) {
+	// keep track of what key is being get so that we know which one to keep cache of
 	ls.queryCounter.mux.Lock()
 	lastIndex := len(ls.queryCounter.keyHistory) - 1
 	ls.queryCounter.keyHistory[lastIndex] = append(ls.queryCounter.keyHistory[lastIndex], key)
@@ -138,8 +142,8 @@ func (ls *libstore) Get(key string) (string, error) {
 	wantLease := ls.checkWantLease(key)
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: wantLease,     //todo lease here
-		HostPort:  ls.myHostPort, //todo
+		WantLease: wantLease,
+		HostPort:  ls.myHostPort,
 	}
 	reply := &storagerpc.GetReply{}
 	storageServerIndex := ls.chooseStorageServer(key)
@@ -230,8 +234,8 @@ func (ls *libstore) GetList(key string) ([]string, error) {
 	wantLease := ls.checkWantLease(key)
 	args := &storagerpc.GetArgs{
 		Key:       key,
-		WantLease: wantLease,     //todo lease here
-		HostPort:  ls.myHostPort, //todo
+		WantLease: wantLease,
+		HostPort:  ls.myHostPort,
 	}
 	reply := &storagerpc.GetListReply{}
 	storageServerIndex := ls.chooseStorageServer(key)
@@ -311,6 +315,8 @@ func (ls *libstore) AppendToList(key, newItem string) error {
 	return nil
 }
 
+// RevokeLease is a RPC used by storageServer when Put was called
+// delete local cache to mark that lease was revoked
 func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storagerpc.RevokeLeaseReply) error {
 	ls.localCache.mux.Lock()
 	defer ls.localCache.mux.Unlock()
@@ -323,6 +329,7 @@ func (ls *libstore) RevokeLease(args *storagerpc.RevokeLeaseArgs, reply *storage
 	return nil
 }
 
+// chooseStorageServer has the main logic for consistent caching
 func (ls *libstore) chooseStorageServer(key string) int {
 	hash := StoreHash(strings.Split(key, ":")[0])
 	servers := ls.sortedServerIDs
@@ -350,6 +357,9 @@ func (ls *libstore) chooseStorageServer(key string) int {
 	return left
 }
 
+// cacheManager is a go routine that decrements the remaining lease that we
+// currently hold by one for each second. When any one reaches 0, we want to
+// revoke the lease and delete the cache.
 func (ls *libstore) cacheManager() {
 	ticker := time.NewTicker(time.Second)
 	for {
@@ -374,6 +384,8 @@ func (ls *libstore) cacheManager() {
 	}
 }
 
+// when reached query cache threshold, we want to cache the value locally (but it also
+// depends on the lease mode)
 func (ls *libstore) reachQueryCacheThresh(key string) bool {
 	ls.queryCounter.mux.Lock()
 	defer ls.queryCounter.mux.Unlock()
@@ -391,6 +403,7 @@ func (ls *libstore) reachQueryCacheThresh(key string) bool {
 	return false
 }
 
+// checkWantLease returns whether to request lease according to the current settings
 func (ls *libstore) checkWantLease(key string) bool {
 	if ls.leaseMode == Never || ls.myHostPort == "" {
 		return false

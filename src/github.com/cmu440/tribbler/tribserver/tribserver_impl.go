@@ -14,7 +14,6 @@ import (
 )
 
 type tribServer struct {
-	// TODO: implement this!
 	lStore   libstore.Libstore
 	listener net.Listener
 }
@@ -70,7 +69,6 @@ func (ts *tribServer) CreateUser(args *tribrpc.CreateUserArgs, reply *tribrpc.Cr
 }
 
 func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-	//todo potential optimization
 	if !ts.testIfUserExist(args.UserID) {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
@@ -88,7 +86,6 @@ func (ts *tribServer) AddSubscription(args *tribrpc.SubscriptionArgs, reply *tri
 }
 
 func (ts *tribServer) RemoveSubscription(args *tribrpc.SubscriptionArgs, reply *tribrpc.SubscriptionReply) error {
-	//todo potential optimization
 	if !ts.testIfUserExist(args.UserID) {
 		reply.Status = tribrpc.NoSuchUser
 		return nil
@@ -153,7 +150,6 @@ func (ts *tribServer) PostTribble(args *tribrpc.PostTribbleArgs, reply *tribrpc.
 		return nil
 	}
 	if err := ts.lStore.Put(tribbleId, string(marshaledTribble)); err != nil {
-		//todo to recover from previous err and make sure it is consistent
 		ts.lStore.RemoveFromList(util.FormatTribListKey(args.UserID), tribbleId)
 		reply.Status = tribrpc.Exists
 		return nil
@@ -188,7 +184,6 @@ func (ts *tribServer) GetTribbles(args *tribrpc.GetTribblesArgs, reply *tribrpc.
 	}
 	reply.Tribbles = make([]tribrpc.Tribble, 0)
 	if list, err := ts.lStore.GetList(util.FormatTribListKey(args.UserID)); err == nil { //if the user posted before
-		//todo what if his post is in three servers && optimize?
 		for _, id := range list {
 			item, err := ts.lStore.Get(id)
 			if err != nil {
@@ -244,11 +239,13 @@ func (ts *tribServer) GetTribblesBySubscription(args *tribrpc.GetTribblesArgs, r
 	return nil
 }
 
+// testIfUserExist returns true if a user exists in libStore by calling Get using user ID
 func (ts *tribServer) testIfUserExist(userId string) bool {
 	emptyString, err := ts.lStore.Get(util.FormatUserKey(userId))
 	return err == nil && emptyString == ""
 }
 
+// ReverseTimeSorter is a wrapper interface for sorting a slice of Tribbles
 type ReverseTimeSorter []tribrpc.Tribble
 
 func (ts ReverseTimeSorter) Len() int           { return len(ts) }
